@@ -885,16 +885,24 @@ function makeCharTemplates(){
   return out;
 }
 function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
-  const padX = Math.max(2, Math.round((x1-x0)*0.18)), padY = Math.max(2, Math.round((y1-y0)*0.18));
-  const sx0 = x0+padX, sx1 = x1-padX, sy0 = y0+padY, sy1 = y1-padY;
+  const padX = Math.max(2, Math.round((x1-x0)*0.16)), padY = Math.max(2, Math.round((y1-y0)*0.16));
+  const sx0 = Math.max(0, x0+padX), sx1 = Math.min(imgW-1, x1-padX);
+  const sy0 = Math.max(0, y0+padY), sy1 = y1-padY;
   if(sx1<=sx0 || sy1<=sy0) return '';
+  let maxLum = 0;
+  for(let y=sy0;y<=sy1;y+=2) for(let x=sx0;x<=sx1;x+=2){
+    const idx = (y*imgW+x)*4;
+    const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
+    if(lum > maxLum) maxLum = lum;
+  }
+  const thresh = Math.min(165, maxLum - 45);
   let bx0=sx1, by0=sy1, bx1=sx0, by1=sy0, count=0;
   for(let y=sy0;y<=sy1;y++) for(let x=sx0;x<=sx1;x++){
     const idx = (y*imgW+x)*4;
     const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
-    if(lum < 145){ count++; if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
+    if(lum < thresh){ count++; if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
   }
-  if(count < 8 || (bx1-bx0)<2 || (by1-by0)<3) return '';
+  if(count < 6 || (bx1-bx0)<2 || (by1-by0)<3) return '';
   const W = 16, H = 20, vec = new Float32Array(W*H);
   const bw = Math.max(1, bx1-bx0+1), bh = Math.max(1, by1-by0+1);
   for(let ty=0;ty<H;ty++) for(let tx=0;tx<W;tx++){
@@ -902,7 +910,7 @@ function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
     const sy = Math.floor(by0 + (ty+0.5)*bh/H);
     const idx = (sy*imgW+sx)*4;
     const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
-    vec[ty*W+tx] = Math.max(0, (200 - lum)/200);
+    vec[ty*W+tx] = Math.max(0, (maxLum - lum)/Math.max(40, maxLum));
   }
   let best = '', bestScore = -1;
   ['A','B','C'].forEach(ch=>{
@@ -912,56 +920,44 @@ function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
     const sc = dot / (Math.sqrt(n1*n2) || 1);
     if(sc > bestScore){ bestScore = sc; best = ch; }
   });
-  return bestScore > 0.35 ? best : '';
+  return bestScore > 0.30 ? best : '';
 }
 function detectSongFromCanvas(data, w, h){
   const palette = SONGS.map(s=>{
     const hex = s.light.replace('#','');
     return { id:s.id, r:parseInt(hex.slice(0,2),16), g:parseInt(hex.slice(2,4),16), b:parseInt(hex.slice(4,6),16), hits:0 };
   });
-  for(let y=Math.floor(h*0.15); y<Math.floor(h*0.85); y+=4){
-    for(let x=Math.floor(w*0.05); x<Math.floor(w*0.95); x+=4){
+  for(let y=Math.floor(h*0.12); y<Math.floor(h*0.92); y+=4){
+    for(let x=Math.floor(w*0.04); x<Math.floor(w*0.96); x+=4){
       const i = (y*w+x)*4, r=data[i], g=data[i+1], b=data[i+2];
+      if(Math.max(r,g,b) - Math.min(r,g,b) < 12) continue;
       palette.forEach(p=>{
-        if(Math.abs(r-p.r)<14 && Math.abs(g-p.g)<14 && Math.abs(b-p.b)<14) p.hits++;
+        const d = Math.abs(r-p.r) + Math.abs(g-p.g) + Math.abs(b-p.b);
+        if(d < 42) p.hits++;
       });
     }
   }
   palette.sort((a,b)=>b.hits-a.hits);
-  return palette[0].hits > 50 ? palette[0].id : S.cur;
+  return palette[0].hits > 30 ? palette[0].id : S.cur;
 }
-function detectMeasureBoxes(data, w, h){
-  const isDark = (x,y) => { const i=(y*w+x)*4; return data[i]<85 && data[i+1]<85 && data[i+2]<85; };
-  const rowBands = [];
-  for(let y=Math.floor(h*0.12); y<Math.floor(h*0.95); y++){
-    let darkRun = 0, maxRun = 0;
-    for(let x=0; x<w; x+=2){ if(isDark(x,y)){ darkRun+=2; if(darkRun>maxRun) maxRun=darkRun; } else darkRun=0; }
-    if(maxRun > w*0.12) rowBands.push(y);
-  }
-  const lines = [];
-  rowBands.forEach(y=>{ if(!lines.length || y - lines[lines.length-1][1] > 3) lines.push([y,y]); else lines[lines.length-1][1]=y; });
-  const pairs = [];
-  for(let i=0; i<lines.length-1; i++){
-    const y0 = lines[i][1], y1 = lines[i+1][0], dy = y1 - y0;
-    if(dy >= h*0.020 && dy <= h*0.065){
-      const ym = Math.round((y0+y1)/2);
-      let inBox = false, bx0 = 0;
-      const boxes = [];
-      for(let x=0; x<w; x++){
-        const topOk = isDark(x, lines[i][0]) || isDark(x, y0);
-        const botOk = isDark(x, y1) || isDark(x, lines[i+1][1]);
-        if(topOk && botOk){
-          if(!inBox){ inBox=true; bx0=x; }
-        } else {
-          if(inBox && x - bx0 > w*0.12){ boxes.push([bx0, y0, x-1, y1]); }
-          inBox = false;
-        }
-      }
-      if(inBox && w - bx0 > w*0.12) boxes.push([bx0, y0, w-1, y1]);
-      if(boxes.length >= 1 && boxes.length <= 4){ pairs.push(boxes); i++; }
-    }
-  }
-  return pairs;
+function getRefCellRects(song){
+  buildPrintRoot('blank', true);
+  fitPrintPages();
+  const sh = $('.sheet', printRoot);
+  const shR = sh.getBoundingClientRect();
+  const rects = [];
+  $$('.c', sh).forEach(c=>{
+    const r = c.getBoundingClientRect();
+    rects.push({
+      k: c.dataset.k,
+      x0: (r.left - shR.left) / shR.width,
+      y0: (r.top - shR.top) / shR.height,
+      x1: (r.right - shR.left) / shR.width,
+      y1: (r.bottom - shR.top) / shR.height
+    });
+  });
+  printRoot.replaceChildren();
+  return rects;
 }
 async function loadPdfFile(file){
   if(!file) return;
@@ -991,23 +987,19 @@ async function loadPdfFile(file){
     const songId = detectSongFromCanvas(img.data, cv.width, cv.height);
     if(SONGS.some(s=>s.id===songId)) S.cur = songId;
     const song = curSong();
-    const rowBoxes = detectMeasureBoxes(img.data, cv.width, cv.height);
+    const rects = getRefCellRects(song);
     const templates = makeCharTemplates();
+    /* makePdfBlob 기준 여백: A4 가로(297x210mm) 내 (5, 5.5, 287, 199.5) */
+    const shX = (5/297)*cv.width, shY = (5.5/210)*cv.height;
+    const shW = (287/297)*cv.width, shH = (199.5/210)*cv.height;
     const cells = {};
-    let ri = 0, loaded = 0;
-    song.secs.forEach(sec=>sec.rows.forEach(row=>{
-      const boxes = rowBoxes[ri] || [];
-      row.m.forEach((lb, k)=>{
-        const b = boxes[k]; if(!b) return;
-        const cw = (b[2] - b[0]) / 16;
-        for(let p=0; p<16; p++){
-          const cx0 = Math.round(b[0] + p*cw), cx1 = Math.round(b[0] + (p+1)*cw);
-          const ch = matchCellChar(img.data, cv.width, cx0, b[1], cx1, b[3], templates);
-          if(ch){ cells[ri+'.'+k+'.'+p] = ch; loaded++; }
-        }
-      });
-      ri++;
-    }));
+    let loaded = 0;
+    rects.forEach(rc=>{
+      const x0 = Math.round(shX + rc.x0*shW), y0 = Math.round(shY + rc.y0*shH);
+      const x1 = Math.round(shX + rc.x1*shW), y1 = Math.round(shY + rc.y1*shH);
+      const ch = matchCellChar(img.data, cv.width, x0, y0, x1, y1, templates);
+      if(ch){ cells[rc.k] = ch; loaded++; }
+    });
     S.songs[S.cur] = { cells, notes:{}, info: infoOf(S.cur) };
     save(); render();
     toast(loaded ? 'PDF에서 '+loaded+'개 칸의 박자를 불러왔어요!' : 'PDF에서 박자 칸을 찾지 못했어요.');
