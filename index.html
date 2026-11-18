@@ -56,7 +56,7 @@ button{font:inherit;color:inherit}
 button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
 [hidden]{display:none !important}
 
-#stage{max-width:none;margin:0;padding:12px 8px 8px;overflow-x:auto}
+#stage{max-width:none;margin:0;padding:12px 8px 8px;overflow-x:clip}
 #wrap{width:1040px;margin:0 auto}
 #wrap .sheet{box-shadow:0 1px 3px rgba(0,0,0,.18),0 10px 28px rgba(0,0,0,.10)}
 .foot{max-width:none;margin:0;padding:6px 16px 36px;font-size:12.5px;color:var(--muted)}
@@ -239,7 +239,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
         <div class="spd">
           <span class="pl">빠르기</span>
           <div class="spd-r">
-            <input type="range" id="spd" min="50" max="150" step="5" value="100" aria-label="재생 빠르기">
+            <input type="range" id="spd" min="50" max="150" step="25" value="100" aria-label="재생 빠르기">
             <div class="spd-t" aria-hidden="true"><span style="left:0">0.5</span><span style="left:25%">0.75</span><span style="left:50%">1.0</span><span style="left:75%">1.25</span><span style="left:100%">1.5</span></div>
           </div>
           <b id="spdV">♩ = 0</b>
@@ -253,6 +253,8 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
           <button type="button" class="btn zb" id="zIn" aria-label="확대">＋</button>
           <button type="button" class="btn" id="zW" title="화면 가로 폭에 맞춰요">폭 맞춤</button>
         </div>
+        <input type="file" id="pdfFile" accept="application/pdf,.pdf" hidden>
+        <button type="button" class="btn" id="btnLoadPdf" title="저장한 PDF 파일을 불러와 악보를 복원해요">PDF 불러오기</button>
         <button type="button" class="btn" id="btnClear">초기화</button>
         <button type="button" class="btn primary" id="btnSave">저장</button>
         <button type="button" class="btn primary" id="btnPrint">PDF 다운로드</button>
@@ -262,12 +264,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
     <div class="bar-in" id="audioRow">
       <button type="button" class="btn on" id="btnYt" aria-pressed="true" title="곡의 유튜브 링크를 반주로 재생해요">유튜브 ON</button>
       <button type="button" class="btn" id="btnYtWin" title="유튜브 미니 플레이어 창 보이기/숨기기">영상 숨기기</button>
-      <div class="aud-file">
-        <input type="file" id="audFile" accept="audio/*" hidden>
-        <button type="button" class="btn" id="btnAudLoad">노래 파일 선택</button>
-        <span class="aud-name" id="audName">유튜브 반주 사용 중</span>
-        <button type="button" class="btn" id="btnAudClear" hidden>해제</button>
-      </div>
+      <span class="aud-name" id="audName">유튜브 반주 연결 중...</span>
       <button type="button" class="btn" id="btnAudPreview" disabled title="노래만 들으면서 1마디 시작 위치를 찾아요">노래만 듣기</button>
       <div class="aud-seek">
         <input type="range" id="audSeek" min="0" max="100" step="0.05" value="0" disabled aria-label="노래 탐색">
@@ -579,21 +576,53 @@ function attachEdit(sh, song){
   sh.addEventListener('copy', e=>{ const r = range(); if(!r) return; e.preventDefault(); e.clipboardData.setData('text/plain', selText(r)); });
   sh.addEventListener('cut', e=>{ const r = range(); if(!r) return; e.preventDefault(); e.clipboardData.setData('text/plain', selText(r)); clearCells(r); });
   sh.addEventListener('paste', e=>{
+    const tgt = e.target;
+    if(!tgt || !tgt.classList || !tgt.classList.contains('c')) return;
     const cd = e.clipboardData || window.clipboardData; if(!cd) return;
-    const raw = cd.getData('text'); const r = range();
-    const lines = raw.replace(/\r/g,'').replace(/\n+$/,'').split('\n').map(l=>l.split('\t'));
-    const multi = lines.length>1 || lines[0].length>1;
-    if(!multi && !r) return;                                   /* 한 칸 → 한 칸은 기본 동작 */
-    const start = r ? r[0] : all.indexOf(document.activeElement); if(start<0) return;
+    const raw = cd.getData('text') || ''; const r = range();
+    const start = r ? r[0] : all.indexOf(tgt); if(start<0) return;
+    const normBeat = t => {
+      const s = String(t||'').trim().toUpperCase();
+      if(!s || /^[-._0X]+$/.test(s)) return '';
+      const m = s.match(/[ABC]/);
+      return m ? m[0] : '';
+    };
+    const cleaned = raw.replace(/\r/g,'').replace(/\d+\s*마디/g,' ');
+    if(cleaned.indexOf('\t') >= 0){
+      const lines = cleaned.replace(/\n+$/,'').split('\n').map(l=>l.split('\t'));
+      const multi = lines.length>1 || lines[0].length>1;
+      e.preventDefault();
+      if(!multi){ const v = normBeat(lines[0][0]); for(let i=(r?r[0]:start); i<=(r?r[1]:start); i++) setCell(all[i], v); save(); return; }
+      const m0 = Math.floor(start/16), p0 = start%16; let last = start;
+      lines.forEach((ln,li)=>ln.forEach((tok,ti)=>{
+        const p = p0+ti; if(p>15) return;
+        const idx = (m0+li)*16+p; if(!all[idx]) return;
+        setCell(all[idx], normBeat(tok)); if(idx>last) last = idx;
+      }));
+      setSel(start, last); save(); return;
+    }
+    const rawToks = cleaned.trim().split(/[\s,|/]+/).filter(Boolean);
+    const toks = [];
+    rawToks.forEach(t=>{
+      if(/^[ABCabc\-._0xX]{2,}$/.test(t)){
+        t.split('').forEach(ch=>toks.push(normBeat(ch)));
+      } else {
+        toks.push(normBeat(t));
+      }
+    });
+    if(toks.length <= 1 && !r) return;
     e.preventDefault();
-    if(!multi){ const v = norm(lines[0][0]); for(let i=r[0]; i<=r[1]; i++) setCell(all[i], v); return; }
-    const m0 = Math.floor(start/16), p0 = start%16; let last = start;
-    lines.forEach((ln,li)=>ln.forEach((tok,ti)=>{
-      const p = p0+ti; if(p>15) return;
-      const idx = (m0+li)*16+p; if(!all[idx]) return;
-      setCell(all[idx], norm(tok)); if(idx>last) last = idx;
-    }));
-    setSel(start, last);
+    if(toks.length <= 1 && r){
+      const v = toks[0] || '';
+      for(let i=r[0]; i<=r[1]; i++) setCell(all[i], v);
+      save(); return;
+    }
+    let last = start;
+    toks.forEach((v, k)=>{
+      const idx = start + k; if(!all[idx]) return;
+      setCell(all[idx], v); last = idx;
+    });
+    setSel(start, last); save();
   });
   sh.addEventListener('input', e=>{
     const t = e.target;
@@ -785,6 +814,8 @@ function ask(o){
 }
 const H2C = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
 const JSPDF = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 function loadScript(src){
   return new Promise((res,rej)=>{
     const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = ()=>rej(new Error('load '+src));
@@ -801,8 +832,188 @@ async function makePdfBlob(){
   const canvas = await window.html2canvas(sheet, {scale:2, backgroundColor:'#ffffff', logging:false, scrollX:0, scrollY:0,
     onclone:(doc)=>{ const r = doc.getElementById('printRoot'); if(r){ r.style.left='0'; r.style.top='0'; } }});
   const pdf = new window.jspdf.jsPDF({orientation:'landscape', unit:'mm', format:'a4'});
+  const payload = JSON.stringify({ v:1, songId:S.cur, info:infoOf(S.cur), st:stateOf(S.cur) });
+  try{ pdf.setProperties({ title:document.title, subject:'PENBEAT_DATA:'+payload }); }catch(e){}
   pdf.addImage(canvas.toDataURL('image/jpeg',0.92), 'JPEG', 5, 5.5, 287, 199.5);   /* 용지 여백 위 5.5 / 좌우·아래 5mm */
   return pdf.output('blob');
+}
+function parseEmbeddedPdfData(buf){
+  try{
+    const txt = new TextDecoder('latin1').decode(new Uint8Array(buf));
+    const idx = txt.indexOf('PENBEAT_DATA:');
+    if(idx < 0) return null;
+    const start = txt.indexOf('{', idx);
+    if(start < 0) return null;
+    let depth = 0, inStr = false, esc = false, end = -1;
+    for(let i=start; i<txt.length && i<start+60000; i++){
+      const ch = txt[i];
+      if(esc){ esc = false; continue; }
+      if(ch === '\\'){ esc = true; continue; }
+      if(ch === '"'){ inStr = !inStr; continue; }
+      if(inStr) continue;
+      if(ch === '{') depth++;
+      else if(ch === '}'){ depth--; if(depth===0){ end = i+1; break; } }
+    }
+    if(end < 0) return null;
+    const utf = new TextDecoder('utf-8').decode(new Uint8Array(buf.slice(start, end)));
+    return JSON.parse(utf);
+  }catch(e){ return null; }
+}
+function makeCharTemplates(){
+  const W = 16, H = 20, out = {};
+  const cv = document.createElement('canvas'); cv.width = 48; cv.height = 48;
+  const cx = cv.getContext('2d');
+  ['A','B','C'].forEach(ch=>{
+    cx.fillStyle = '#fff'; cx.fillRect(0,0,48,48);
+    cx.fillStyle = '#000'; cx.font = '700 28px "Noto Sans KR",sans-serif';
+    cx.textAlign = 'center'; cx.textBaseline = 'middle';
+    cx.fillText(ch, 24, 24);
+    const id = cx.getImageData(0,0,48,48).data;
+    let x0=48,y0=48,x1=-1,y1=-1;
+    for(let y=0;y<48;y++) for(let x=0;x<48;x++){
+      if(id[(y*48+x)*4] < 160){ if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; }
+    }
+    const vec = new Float32Array(W*H);
+    const bw = Math.max(1, x1-x0+1), bh = Math.max(1, y1-y0+1);
+    for(let ty=0;ty<H;ty++) for(let tx=0;tx<W;tx++){
+      const sx = Math.min(47, Math.floor(x0 + (tx+0.5)*bw/W));
+      const sy = Math.min(47, Math.floor(y0 + (ty+0.5)*bh/H));
+      vec[ty*W+tx] = (255 - id[(sy*48+sx)*4]) / 255;
+    }
+    out[ch] = vec;
+  });
+  return out;
+}
+function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
+  const padX = Math.max(2, Math.round((x1-x0)*0.18)), padY = Math.max(2, Math.round((y1-y0)*0.18));
+  const sx0 = x0+padX, sx1 = x1-padX, sy0 = y0+padY, sy1 = y1-padY;
+  if(sx1<=sx0 || sy1<=sy0) return '';
+  let bx0=sx1, by0=sy1, bx1=sx0, by1=sy0, count=0;
+  for(let y=sy0;y<=sy1;y++) for(let x=sx0;x<=sx1;x++){
+    const idx = (y*imgW+x)*4;
+    const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
+    if(lum < 145){ count++; if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
+  }
+  if(count < 8 || (bx1-bx0)<2 || (by1-by0)<3) return '';
+  const W = 16, H = 20, vec = new Float32Array(W*H);
+  const bw = Math.max(1, bx1-bx0+1), bh = Math.max(1, by1-by0+1);
+  for(let ty=0;ty<H;ty++) for(let tx=0;tx<W;tx++){
+    const sx = Math.floor(bx0 + (tx+0.5)*bw/W);
+    const sy = Math.floor(by0 + (ty+0.5)*bh/H);
+    const idx = (sy*imgW+sx)*4;
+    const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
+    vec[ty*W+tx] = Math.max(0, (200 - lum)/200);
+  }
+  let best = '', bestScore = -1;
+  ['A','B','C'].forEach(ch=>{
+    const tpl = templates[ch];
+    let dot=0, n1=0, n2=0;
+    for(let i=0;i<vec.length;i++){ dot+=vec[i]*tpl[i]; n1+=vec[i]*vec[i]; n2+=tpl[i]*tpl[i]; }
+    const sc = dot / (Math.sqrt(n1*n2) || 1);
+    if(sc > bestScore){ bestScore = sc; best = ch; }
+  });
+  return bestScore > 0.35 ? best : '';
+}
+function detectSongFromCanvas(data, w, h){
+  const palette = SONGS.map(s=>{
+    const hex = s.light.replace('#','');
+    return { id:s.id, r:parseInt(hex.slice(0,2),16), g:parseInt(hex.slice(2,4),16), b:parseInt(hex.slice(4,6),16), hits:0 };
+  });
+  for(let y=Math.floor(h*0.15); y<Math.floor(h*0.85); y+=4){
+    for(let x=Math.floor(w*0.05); x<Math.floor(w*0.95); x+=4){
+      const i = (y*w+x)*4, r=data[i], g=data[i+1], b=data[i+2];
+      palette.forEach(p=>{
+        if(Math.abs(r-p.r)<14 && Math.abs(g-p.g)<14 && Math.abs(b-p.b)<14) p.hits++;
+      });
+    }
+  }
+  palette.sort((a,b)=>b.hits-a.hits);
+  return palette[0].hits > 50 ? palette[0].id : S.cur;
+}
+function detectMeasureBoxes(data, w, h){
+  const isDark = (x,y) => { const i=(y*w+x)*4; return data[i]<85 && data[i+1]<85 && data[i+2]<85; };
+  const rowBands = [];
+  for(let y=Math.floor(h*0.12); y<Math.floor(h*0.95); y++){
+    let darkRun = 0, maxRun = 0;
+    for(let x=0; x<w; x+=2){ if(isDark(x,y)){ darkRun+=2; if(darkRun>maxRun) maxRun=darkRun; } else darkRun=0; }
+    if(maxRun > w*0.12) rowBands.push(y);
+  }
+  const lines = [];
+  rowBands.forEach(y=>{ if(!lines.length || y - lines[lines.length-1][1] > 3) lines.push([y,y]); else lines[lines.length-1][1]=y; });
+  const pairs = [];
+  for(let i=0; i<lines.length-1; i++){
+    const y0 = lines[i][1], y1 = lines[i+1][0], dy = y1 - y0;
+    if(dy >= h*0.020 && dy <= h*0.065){
+      const ym = Math.round((y0+y1)/2);
+      let inBox = false, bx0 = 0;
+      const boxes = [];
+      for(let x=0; x<w; x++){
+        const topOk = isDark(x, lines[i][0]) || isDark(x, y0);
+        const botOk = isDark(x, y1) || isDark(x, lines[i+1][1]);
+        if(topOk && botOk){
+          if(!inBox){ inBox=true; bx0=x; }
+        } else {
+          if(inBox && x - bx0 > w*0.12){ boxes.push([bx0, y0, x-1, y1]); }
+          inBox = false;
+        }
+      }
+      if(inBox && w - bx0 > w*0.12) boxes.push([bx0, y0, w-1, y1]);
+      if(boxes.length >= 1 && boxes.length <= 4){ pairs.push(boxes); i++; }
+    }
+  }
+  return pairs;
+}
+async function loadPdfFile(file){
+  if(!file) return;
+  toast('PDF를 분석하는 중이에요…');
+  try{
+    const buf = await file.arrayBuffer();
+    const embedded = parseEmbeddedPdfData(buf);
+    if(embedded && embedded.songId && embedded.st){
+      if(SONGS.some(s=>s.id===embedded.songId)) S.cur = embedded.songId;
+      S.songs[S.cur] = { cells: embedded.st.cells || {}, notes: embedded.st.notes || {}, info: embedded.info || {no:'', name:''} };
+      if(embedded.info) S.info = { no: embedded.info.no||'', name: embedded.info.name||'' };
+      save(); render();
+      toast('저장된 PDF 데이터를 완벽하게 불러왔어요!');
+      return;
+    }
+    if(!window.pdfjsLib){
+      await loadScript(PDFJS);
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+    }
+    const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+    const page = await pdf.getPage(1);
+    const vp = page.getViewport({ scale: 3 });
+    const cv = document.createElement('canvas'); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+    const cx = cv.getContext('2d');
+    await page.render({ canvasContext: cx, viewport: vp }).promise;
+    const img = cx.getImageData(0, 0, cv.width, cv.height);
+    const songId = detectSongFromCanvas(img.data, cv.width, cv.height);
+    if(SONGS.some(s=>s.id===songId)) S.cur = songId;
+    const song = curSong();
+    const rowBoxes = detectMeasureBoxes(img.data, cv.width, cv.height);
+    const templates = makeCharTemplates();
+    const cells = {};
+    let ri = 0, loaded = 0;
+    song.secs.forEach(sec=>sec.rows.forEach(row=>{
+      const boxes = rowBoxes[ri] || [];
+      row.m.forEach((lb, k)=>{
+        const b = boxes[k]; if(!b) return;
+        const cw = (b[2] - b[0]) / 16;
+        for(let p=0; p<16; p++){
+          const cx0 = Math.round(b[0] + p*cw), cx1 = Math.round(b[0] + (p+1)*cw);
+          const ch = matchCellChar(img.data, cv.width, cx0, b[1], cx1, b[3], templates);
+          if(ch){ cells[ri+'.'+k+'.'+p] = ch; loaded++; }
+        }
+      });
+      ri++;
+    }));
+    S.songs[S.cur] = { cells, notes:{}, info: infoOf(S.cur) };
+    save(); render();
+    toast(loaded ? 'PDF에서 '+loaded+'개 칸의 박자를 불러왔어요!' : 'PDF에서 박자 칸을 찾지 못했어요.');
+  }catch(err){
+    toast('PDF를 불러오지 못했어요: ' + (err && err.message ? err.message : '오류'));
+  }
 }
 function download(blob, filename){
   const url = URL.createObjectURL(blob);
@@ -855,46 +1066,51 @@ function loadSyncs(){
 const PL = {
   paused:false, ctx:null, noise:null, comp:null, out:null, playing:false, timer:0, raf:0,
   keys:[], seq:[], ms:[], times:[], i:0, cur:0, next:0, speed:1, bar:null, lastGd:null,
-  audio:new Audio(), hasAudio:false, audUrl:'', preview:false, metOn:false, scheduledIdx:0,
-  seeking:false, syncs:loadSyncs(),
+  preview:false, metOn:false, scheduledIdx:0, seeking:false, syncs:loadSyncs(),
   yt:null, ytReady:false, ytEnabled:true, ytVisible:true, ytPlaying:false, ytBlocked:false,
-  ytVid:'', ytLastRaw:0, ytLastPerf:0, ytPoll:0
+  ytVid:'', ytLastRaw:0, ytLastPerf:0, ytPoll:0, ytVol:80, userScrolledAt:0
 };
-PL.audio.preload = 'auto';
-PL.audio.volume = 0.8;
 function ytIdFromUrl(url){
   const m = String(url||'').match(/(?:youtu\.be\/|v=|\/embed\/)([A-Za-z0-9_-]{11})/);
   return m ? m[1] : '';
 }
 function audMode(){
-  if(PL.hasAudio) return 'file';
   if(PL.ytEnabled && !PL.ytBlocked && ytIdFromUrl(curSong().link)) return 'yt';
   return 'none';
 }
 function getSourceTime(){
-  const mode = audMode();
-  if(mode === 'file') return PL.audio.currentTime || 0;
-  if(mode === 'yt' && PL.yt && PL.ytReady){
+  if(audMode() === 'yt' && PL.yt && PL.ytReady){
     const raw = Number(PL.yt.getCurrentTime && PL.yt.getCurrentTime()) || 0;
     const now = performance.now();
-    if(Math.abs(raw - PL.ytLastRaw) > 0.002){ PL.ytLastRaw = raw; PL.ytLastPerf = now; return raw; }
-    if(PL.ytPlaying) return raw + ((now - PL.ytLastPerf)/1000) * PL.speed;
+    if(PL.ytPlaying){
+      const pred = PL.ytLastRaw + ((now - PL.ytLastPerf)/1000) * PL.speed;
+      if(Math.abs(raw - pred) > 0.09){ PL.ytLastRaw = raw; PL.ytLastPerf = now; return raw; }
+      return pred;
+    }
+    PL.ytLastRaw = raw; PL.ytLastPerf = now;
     return raw;
   }
   return 0;
 }
 function getSourceDuration(){
-  const mode = audMode();
-  if(mode === 'file') return isFinite(PL.audio.duration) ? PL.audio.duration : 0;
-  if(mode === 'yt' && PL.yt && PL.ytReady) return Number(PL.yt.getDuration && PL.yt.getDuration()) || 0;
+  if(audMode() === 'yt' && PL.yt && PL.ytReady) return Number(PL.yt.getDuration && PL.yt.getDuration()) || 0;
   return 0;
 }
 function isSourcePlaying(){
-  const mode = audMode();
-  if(mode === 'file') return !PL.audio.paused;
-  if(mode === 'yt') return PL.ytPlaying;
-  return false;
+  return audMode() === 'yt' && PL.ytPlaying;
 }
+function scrollMeasureIntoView(m, seqMi){
+  if(!m) return;
+  if(seqMi === 0){ window.scrollTo({top:0, behavior:'smooth'}); return; }
+  if(performance.now() - PL.userScrolledAt < 2500) return;
+  const bar = $('.bar'), barH = bar ? bar.getBoundingClientRect().bottom : 0;
+  const r = m.getBoundingClientRect();
+  if(r.top < barH + 12 || r.bottom > window.innerHeight - 24){
+    window.scrollBy({top: r.top - barH - 28, behavior:'smooth'});
+  }
+}
+window.addEventListener('wheel', ()=>{ PL.userScrolledAt = performance.now(); }, {passive:true});
+window.addEventListener('touchmove', ()=>{ PL.userScrolledAt = performance.now(); }, {passive:true});
 function initYT(){
   if(PL._ytInit) return;
   PL._ytInit = true;
@@ -912,7 +1128,7 @@ window.onYouTubeIframeAPIReady = function(){
     events:{
       onReady: ()=>{
         PL.ytReady = true;
-        PL.yt.setVolume(Math.round(PL.audio.volume*100));
+        PL.yt.setVolume(PL.ytVol);
         cueSongYT(true);
         updateSyncUI(); updateAudioTimeUI();
       },
@@ -936,7 +1152,7 @@ window.onYouTubeIframeAPIReady = function(){
         PL.ytBlocked = true;
         if(PL.preview){ PL.preview = false; }
         updateSyncUI();
-        toast('이 유튜브 영상은 외부 재생이 차단되어 있어요. "노래 파일 선택"을 이용해 주세요.');
+        toast('이 유튜브 영상은 외부 재생이 차단되어 있어요.');
       }
     }
   });
@@ -995,9 +1211,9 @@ function updateSyncUI(){
   const by = $('#btnYt');
   if(by){
     by.textContent = PL.ytEnabled ? '유튜브 ON' : '유튜브 OFF';
-    by.classList.toggle('on', PL.ytEnabled && !PL.hasAudio);
+    by.classList.toggle('on', PL.ytEnabled);
     by.setAttribute('aria-pressed', PL.ytEnabled?'true':'false');
-    by.disabled = PL.hasAudio;
+    by.disabled = false;
   }
   const bw = $('#btnYtWin');
   if(bw){
@@ -1010,14 +1226,13 @@ function updateSyncUI(){
     yw.classList.toggle('off', mode !== 'yt' || !PL.ytVisible);
   }
   const nm = $('#audName');
-  if(nm && !PL.hasAudio) nm.textContent = mode==='yt' ? (PL.ytReady ? '유튜브 반주 연결됨' : '유튜브 불러오는 중...') : '반주 없음 (펜비트만)';
+  if(nm) nm.textContent = mode==='yt' ? (PL.ytReady ? '유튜브 반주 연결됨' : '유튜브 불러오는 중...') : '반주 없음 (펜비트만)';
   const bm = $('#btnMet');
   if(bm){ bm.textContent = PL.metOn ? '메트로놈 ON' : '메트로놈 OFF'; bm.classList.toggle('on', PL.metOn); bm.setAttribute('aria-pressed', PL.metOn?'true':'false'); }
   const bp = $('#btnAudPreview');
   if(bp){ bp.disabled = !hasSrc; bp.textContent = PL.preview ? '미리듣기 정지' : '노래만 듣기'; bp.classList.toggle('on', PL.preview); }
   const bs = $('#btnSyncNow'); if(bs) bs.disabled = !hasSrc;
   const sk = $('#audSeek'); if(sk) sk.disabled = !hasSrc;
-  const bc = $('#btnAudClear'); if(bc) bc.hidden = !PL.hasAudio;
 }
 function audioCtx(){
   if(!PL.ctx){
@@ -1119,7 +1334,7 @@ function frame(){
   const mode = audMode();
   if(mode !== 'none' && !PL.preview){
     updateAudioTimeUI();
-    if(mode === 'file' || PL.ytPlaying){
+    if(PL.ytPlaying){
       const baseStep = 60/curSong().tempo/4, offset = getSync(S.cur);
       const pos = (getSourceTime() - offset) / baseStep;
       if(pos >= 0 && pos < PL.keys.length){
@@ -1128,7 +1343,7 @@ function frame(){
           if(PL.bar.parentNode !== m){
             m.append(PL.bar); showPos(seqMi);
             const gd = m.closest('.gd');
-            if(gd !== PL.lastGd){ PL.lastGd = gd; try{ m.scrollIntoView({block:'center', behavior:'smooth'}); }catch(e){} }
+            if(gd !== PL.lastGd){ PL.lastGd = gd; scrollMeasureIntoView(m, seqMi); }
           }
           PL.bar.style.left = ((pos%16)/16*100)+'%';
         }
@@ -1149,7 +1364,7 @@ function frame(){
       if(PL.bar.parentNode !== m){
         m.append(PL.bar); showPos(seqMi);
         const gd = m.closest('.gd');
-        if(gd !== PL.lastGd){ PL.lastGd = gd; try{ m.scrollIntoView({block:'center', behavior:'smooth'}); }catch(e){} }
+        if(gd !== PL.lastGd){ PL.lastGd = gd; scrollMeasureIntoView(m, seqMi); }
       }
       PL.bar.style.left = ((pos%16)/16*100)+'%';
     }
@@ -1162,20 +1377,14 @@ const ICON = {
   restart:'<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="3" height="16" rx="1"/><path d="M20 4v16L9 12z"/></svg>'
 };
 function pauseSource(){
-  if(PL.hasAudio) PL.audio.pause();
   if(PL.yt && PL.ytReady) try{ PL.yt.pauseVideo(); }catch(e){}
   PL.ytPlaying = false;
   clearInterval(PL.ytPoll); PL.ytPoll = 0;
 }
 function playSource(atTime){
-  const mode = audMode();
-  if(mode === 'file'){
-    applyPlaybackRate(PL.audio, PL.speed);
-    if(typeof atTime === 'number') PL.audio.currentTime = atTime;
-    PL.audio.play().catch(()=>{});
-  } else if(mode === 'yt' && PL.yt && PL.ytReady){
+  if(audMode() === 'yt' && PL.yt && PL.ytReady){
     try{
-      PL.yt.setVolume(Math.round(PL.audio.volume*100));
+      PL.yt.setVolume(PL.ytVol);
       PL.yt.setPlaybackRate(PL.speed);
       if(typeof atTime === 'number'){
         PL.yt.seekTo(atTime, true);
@@ -1273,17 +1482,13 @@ function startPlay(atStartOnly, mi0){
   PL.out = ac.createGain(); PL.out.gain.value = 0.9; PL.out.connect(PL.comp);
   PL.bar = el('div','ph');
   const mode = audMode();
-  if(mode !== 'none'){
+  if(mode === 'yt'){
     const baseStep = 60/song.tempo/4, offset = getSync(song.id);
-    let targetTime = Math.max(0, offset + mi0*16*baseStep);
-    if(mi0 === 0 && offset > 0.05) targetTime = Math.max(0, offset - 0.03);
+    const targetTime = Math.max(0, offset + mi0*16*baseStep);
     PL.scheduledIdx = Math.max(0, mi0*16);
     if(!atStartOnly){
       playSource(targetTime);
-    } else if(mode === 'file'){
-      applyPlaybackRate(PL.audio, PL.speed);
-      PL.audio.currentTime = targetTime;
-    } else if(mode === 'yt' && PL.yt && PL.ytReady){
+    } else if(PL.yt && PL.ytReady){
       try{ PL.yt.seekTo(targetTime, true); PL.ytLastRaw = targetTime; PL.ytLastPerf = performance.now(); }catch(e){}
     }
     updateAudioTimeUI();
@@ -1293,7 +1498,7 @@ function startPlay(atStartOnly, mi0){
   if(atStartOnly){
     PL.paused = true; ac.resume().then(()=>{ if(PL.paused) ac.suspend(); });
     const item = PL.seq[mi0], m = item && PL.ms[item.domIdx];
-    if(m){ m.append(PL.bar); PL.bar.style.left = '0%'; showPos(mi0); PL.lastGd = m.closest('.gd'); try{ m.scrollIntoView({block:'center', behavior:'smooth'}); }catch(e){} }
+    if(m){ m.append(PL.bar); PL.bar.style.left = '0%'; showPos(mi0); PL.lastGd = m.closest('.gd'); scrollMeasureIntoView(m, mi0); }
   }
   updatePlayUI();
 }
@@ -1326,12 +1531,12 @@ $('#posM').addEventListener('change', goMeasure);
 $('#posM').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); goMeasure(); $('#posM').blur(); } });
 $('#spd').addEventListener('input', e=>{
   PL.speed = (+e.target.value)/100;
-  if(PL.hasAudio) applyPlaybackRate(PL.audio, PL.speed);
-  if(audMode()==='yt' && PL.yt && PL.ytReady) try{ PL.yt.setPlaybackRate(PL.speed); }catch(e){}
+  if(audMode()==='yt' && PL.yt && PL.ytReady){
+    try{ PL.yt.setPlaybackRate(PL.speed); }catch(e){}
+  }
   updatePlayUI();
 });
 $('#btnYt').addEventListener('click', ()=>{
-  if(PL.hasAudio) return;
   if(PL.playing) stopPlay();
   if(PL.preview){ PL.preview = false; pauseSource(); }
   PL.ytEnabled = !PL.ytEnabled;
@@ -1340,56 +1545,28 @@ $('#btnYt').addEventListener('click', ()=>{
 });
 $('#btnYtWin').addEventListener('click', ()=>{ PL.ytVisible = !PL.ytVisible; updateSyncUI(); });
 $('#btnYtHide').addEventListener('click', ()=>{ PL.ytVisible = false; updateSyncUI(); });
-$('#btnAudLoad').addEventListener('click', ()=>$('#audFile').click());
-$('#audFile').addEventListener('change', e=>{
-  const f = e.target.files && e.target.files[0]; if(!f) return;
-  if(PL.playing) stopPlay();
-  if(PL.preview){ PL.preview = false; pauseSource(); }
-  if(PL.audUrl) URL.revokeObjectURL(PL.audUrl);
-  PL.audUrl = URL.createObjectURL(f);
-  PL.audio.src = PL.audUrl;
-  PL.hasAudio = true;
-  applyPlaybackRate(PL.audio, PL.speed);
-  $('#audName').textContent = f.name;
-  updateSyncUI(); updateAudioTimeUI();
-  toast('노래를 불러왔어요: ' + f.name);
-});
-$('#btnAudClear').addEventListener('click', ()=>{
-  if(PL.playing) stopPlay();
-  if(PL.preview){ PL.preview = false; pauseSource(); }
-  if(PL.audUrl){ URL.revokeObjectURL(PL.audUrl); PL.audUrl = ''; }
-  PL.audio.removeAttribute('src'); PL.audio.load();
-  PL.hasAudio = false; $('#audFile').value = '';
-  cueSongYT();
-  updateSyncUI(); updateAudioTimeUI();
+$('#btnLoadPdf').addEventListener('click', ()=>$('#pdfFile').click());
+$('#pdfFile').addEventListener('change', e=>{
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if(f) loadPdfFile(f);
 });
 $('#btnAudPreview').addEventListener('click', ()=>{
-  const mode = audMode(); if(mode==='none') return;
+  if(audMode()!=='yt') return;
   if(PL.playing) stopPlay();
   if(PL.preview){
     PL.preview = false; pauseSource();
   } else {
     PL.preview = true; playSource();
-    if(mode==='yt'){
-      clearInterval(PL.ytPoll);
-      PL.ytPoll = setInterval(()=>{ if(PL.preview) updateAudioTimeUI(); }, 200);
-    }
+    clearInterval(PL.ytPoll);
+    PL.ytPoll = setInterval(()=>{ if(PL.preview) updateAudioTimeUI(); }, 200);
   }
   updateSyncUI();
-});
-PL.audio.addEventListener('loadedmetadata', updateAudioTimeUI);
-PL.audio.addEventListener('timeupdate', ()=>{ if(PL.preview || !PL.playing) updateAudioTimeUI(); });
-PL.audio.addEventListener('ended', ()=>{
-  if(PL.preview){ PL.preview = false; updateSyncUI(); }
-  if(PL.playing) stopPlay();
 });
 $('#audSeek').addEventListener('pointerdown', ()=>{ PL.seeking = true; });
 $('#audSeek').addEventListener('pointerup', ()=>{ PL.seeking = false; });
 $('#audSeek').addEventListener('input', e=>{
-  const mode = audMode(), val = +e.target.value;
-  if(mode==='file'){
-    PL.audio.currentTime = val;
-  } else if(mode==='yt' && PL.yt && PL.ytReady){
+  const val = +e.target.value;
+  if(audMode()==='yt' && PL.yt && PL.ytReady){
     try{ PL.yt.seekTo(val, true); PL.ytLastRaw = val; PL.ytLastPerf = performance.now(); }catch(e){}
   } else return;
   if(PL.playing){
@@ -1399,9 +1576,8 @@ $('#audSeek').addEventListener('input', e=>{
   updateAudioTimeUI();
 });
 $('#audVol').addEventListener('input', e=>{
-  const v = (+e.target.value)/100;
-  PL.audio.volume = v;
-  if(PL.yt && PL.ytReady) try{ PL.yt.setVolume(Math.round(v*100)); }catch(e){}
+  PL.ytVol = +e.target.value;
+  if(PL.yt && PL.ytReady) try{ PL.yt.setVolume(PL.ytVol); }catch(e){}
 });
 $('#btnMet').addEventListener('click', ()=>{ PL.metOn = !PL.metOn; updateSyncUI(); });
 $('#syncSec').addEventListener('change', e=>{ setSync(S.cur, parseFloat(e.target.value)||0); });
@@ -1422,7 +1598,6 @@ document.addEventListener('keydown', e=>{
 });
 function resetSpeed(){
   PL.speed = 1; $('#spd').value = 100;
-  if(PL.hasAudio) applyPlaybackRate(PL.audio, 1);
   if(PL.yt && PL.ytReady) try{ PL.yt.setPlaybackRate(1); }catch(e){}
 }
 
