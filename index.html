@@ -162,11 +162,14 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 .sync-box input[type=number]{width:58px;height:30px;box-sizing:border-box;padding:0 4px;border:1.5px solid var(--border);border-radius:7px;text-align:center;font:inherit;background:var(--panel);color:var(--text)}
 .sync-box .btn.sm{height:30px;padding:0 7px;font-size:12px}
 #ytWrap{position:fixed;right:14px;bottom:14px;z-index:20;background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);overflow:hidden;width:248px}
-#ytWrap.off{position:fixed;left:-9999px;top:-9999px;right:auto;bottom:auto;opacity:.01;pointer-events:none}
-#ytHead{display:flex;align-items:center;justify-content:space-between;padding:4px 8px;font-size:11px;font-weight:700;background:var(--seg);color:var(--text)}
+#ytWrap.off{position:fixed;left:-9999px !important;top:-9999px !important;right:auto !important;bottom:auto !important;opacity:.01;pointer-events:none}
+#ytHead{display:flex;align-items:center;justify-content:space-between;padding:4px 8px;font-size:11px;font-weight:700;background:var(--seg);color:var(--text);cursor:move;user-select:none;touch-action:none}
 #ytHead button{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:13px;padding:0 4px}
 #ytPlayer{width:248px;height:140px;display:block}
-@media print{#ytWrap{display:none !important}}
+#cdBox{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;min-width:120px;padding:18px 30px;border-radius:20px;background:rgba(15,23,42,.86);color:#fff;text-align:center;box-shadow:0 14px 36px rgba(0,0,0,.35);pointer-events:none}
+#cdBox .cd-n{font-size:52px;font-weight:800;line-height:1}
+#cdBox .cd-s{margin-top:6px;font-size:13px;opacity:.85}
+@media print{#ytWrap,#cdBox{display:none !important}}
 
 /* ---------- print ---------- */
 #printRoot{position:fixed;left:-12000px;top:0;width:1085px;z-index:-1;pointer-events:none}
@@ -297,9 +300,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 </div>
 <div id="printRoot" aria-hidden="true"></div>
 <div id="ytWrap" class="off" hidden>
-  <div id="ytHead"><span>유튜브 반주</span><button type="button" id="btnYtHide" title="창 숨기기">✕</button></div>
+  <div id="ytHead"><span>유튜브 반주 (드래그 이동)</span><button type="button" id="btnYtHide" title="창 숨기기">✕</button></div>
   <div id="ytPlayer"></div>
 </div>
+<div id="cdBox" hidden><div class="cd-n" id="cdNum">4</div><div class="cd-s">준비하세요…</div></div>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -970,8 +974,35 @@ function getRefCellRects(song){
       y1: (r.bottom - cMinY) / ch
     });
   });
+  const noteBoxes = $$('.note', sh).map(n=>{
+    const r = n.getBoundingClientRect();
+    return { x0:(r.left-cMinX)/cw, y0:(r.top-cMinY)/ch, x1:(r.right-cMinX)/cw, y1:(r.bottom-cMinY)/ch };
+  });
+  const whoKeys = ['no', 'name'];
+  const whoBoxes = $$('.who .f', sh).map((f, idx)=>{
+    const r = f.getBoundingClientRect();
+    const lab = f.firstElementChild ? f.firstElementChild.getBoundingClientRect() : r;
+    return { key:whoKeys[idx], x0:(lab.right-cMinX)/cw, y0:(r.top-cMinY)/ch, x1:(r.right-cMinX)/cw, y1:(r.bottom-cMinY)/ch };
+  });
   printRoot.replaceChildren();
-  return mBoxes;
+  return { mBoxes, noteBoxes, whoBoxes };
+}
+const TESSERACT_JS = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+function hasBoxInk(data, w, x0, y0, x1, y1){
+  let cnt = 0;
+  for(let y=y0+2; y<y1-2; y+=2) for(let x=x0+2; x<x1-2; x+=2){
+    const i = (y*w+x)*4;
+    if(0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2] < 160){ cnt++; if(cnt >= 15) return true; }
+  }
+  return false;
+}
+function cropBoxCanvas(srcCv, x0, y0, x1, y1){
+  const w = Math.max(4, x1 - x0), h = Math.max(4, y1 - y0);
+  const c = document.createElement('canvas'); c.width = w * 2; c.height = h * 2;
+  const cx = c.getContext('2d');
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+  cx.drawImage(srcCv, x0, y0, w, h, 0, 0, c.width, c.height);
+  return c;
 }
 function snapMeasureBox(data, w, h, ex0, ey0, ex1, ey1){
   const lum = (x,y) => { const i=(y*w+x)*4; return 0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]; };
@@ -1053,12 +1084,12 @@ async function loadPdfFile(file){
     const songId = detectSongFromCanvas(img.data, cv.width, cv.height);
     if(SONGS.some(s=>s.id===songId)) S.cur = songId;
     const song = curSong();
-    const mBoxes = getRefCellRects(song);
+    const ref = getRefCellRects(song);
     const templates = makeCharTemplates();
     const bounds = findContentBounds(img.data, cv.width, cv.height);
     const cells = {};
     let loaded = 0;
-    mBoxes.forEach(mb=>{
+    ref.mBoxes.forEach(mb=>{
       const ex0 = Math.round(bounds.x + mb.x0*bounds.w), ey0 = Math.round(bounds.y + mb.y0*bounds.h);
       const ex1 = Math.round(bounds.x + mb.x1*bounds.w), ey1 = Math.round(bounds.y + mb.y1*bounds.h);
       const [mx0, my0, mx1, my1] = snapMeasureBox(img.data, cv.width, cv.height, ex0, ey0, ex1, ey1);
@@ -1069,9 +1100,37 @@ async function loadPdfFile(file){
         if(ch){ cells[key] = ch; loaded++; }
       });
     });
-    S.songs[S.cur] = { cells, notes:{}, info: infoOf(S.cur) };
+    const notes = {}, info = Object.assign({}, infoOf(S.cur));
+    const ocrJobs = [];
+    ref.whoBoxes.forEach(wb=>{
+      const x0 = Math.round(bounds.x + wb.x0*bounds.w) + 2, y0 = Math.round(bounds.y + wb.y0*bounds.h) + 2;
+      const x1 = Math.round(bounds.x + wb.x1*bounds.w) - 2, y1 = Math.round(bounds.y + wb.y1*bounds.h) - 2;
+      if(hasBoxInk(img.data, cv.width, x0, y0, x1, y1)) ocrJobs.push({ type:'who', key:wb.key, x0, y0, x1, y1 });
+    });
+    ref.noteBoxes.forEach((nb, si)=>{
+      const x0 = Math.round(bounds.x + nb.x0*bounds.w) + 2, y0 = Math.round(bounds.y + nb.y0*bounds.h) + 2;
+      const x1 = Math.round(bounds.x + nb.x1*bounds.w) - 2, y1 = Math.round(bounds.y + nb.y1*bounds.h) - 4;
+      if(hasBoxInk(img.data, cv.width, x0, y0, x1, y1)) ocrJobs.push({ type:'note', key:si, x0, y0, x1, y1 });
+    });
+    if(ocrJobs.length){
+      toast('박자 '+loaded+'개 인식 완료! 학번·이름·설명을 읽는 중…');
+      try{
+        if(!window.Tesseract) await loadScript(TESSERACT_JS);
+        const worker = await window.Tesseract.createWorker('kor+eng');
+        for(const job of ocrJobs){
+          const res = await worker.recognize(cropBoxCanvas(cv, job.x0, job.y0, job.x1, job.y1));
+          const txt = String(res && res.data && res.data.text || '').replace(/\s+/g,' ').trim();
+          if(!txt) continue;
+          if(job.type === 'who') info[job.key] = txt.slice(0, 16);
+          else notes[job.key] = txt;
+        }
+        await worker.terminate();
+      }catch(ocrErr){}
+    }
+    S.songs[S.cur] = { cells, notes, info };
+    S.info = { no: info.no||'', name: info.name||'' };
     save(); render();
-    toast(loaded ? 'PDF에서 '+loaded+'개 칸의 박자를 불러왔어요!' : 'PDF에서 박자 칸을 찾지 못했어요.');
+    toast(loaded ? 'PDF에서 '+loaded+'개 칸의 박자와 정보를 불러왔어요!' : 'PDF에서 박자 칸을 찾지 못했어요.');
   }catch(err){
     toast('PDF를 불러오지 못했어요: ' + (err && err.message ? err.message : '오류'));
   }
@@ -1145,8 +1204,10 @@ function getSourceTime(){
     const now = performance.now();
     if(PL.ytPlaying){
       const pred = PL.ytLastRaw + ((now - PL.ytLastPerf)/1000) * PL.speed;
-      if(Math.abs(raw - pred) > 0.09){ PL.ytLastRaw = raw; PL.ytLastPerf = now; return raw; }
-      return pred;
+      const diff = raw - pred;
+      if(Math.abs(diff) > 0.12){ PL.ytLastRaw = raw; PL.ytLastPerf = now; return raw; }
+      if(Math.abs(diff) > 0.02){ PL.ytLastRaw += diff * 0.18; }
+      return PL.ytLastRaw + ((now - PL.ytLastPerf)/1000) * PL.speed;
     }
     PL.ytLastRaw = raw; PL.ytLastPerf = now;
     return raw;
@@ -1455,9 +1516,50 @@ function playSource(atTime){
     }catch(e){}
   }
 }
+function cancelCountdown(){
+  if(PL.cdTimer){ clearInterval(PL.cdTimer); PL.cdTimer = 0; }
+  PL.counting = false;
+  const cb = $('#cdBox'); if(cb) cb.hidden = true;
+}
+function startCountdown(mi0){
+  cancelCountdown();
+  const ac = audioCtx();
+  const song = curSong();
+  if(audMode()==='yt' && PL.yt && PL.ytReady){
+    const baseStep = 60/song.tempo/4, offset = getSync(song.id);
+    const targetTime = Math.max(0, offset + (mi0||0)*16*baseStep);
+    try{ PL.yt.seekTo(targetTime, true); PL.ytLastRaw = targetTime; PL.ytLastPerf = performance.now(); }catch(e){}
+  }
+  let left = 4;
+  const cb = $('#cdBox'), cn = $('#cdNum');
+  if(cb && cn){ cn.textContent = left; cb.hidden = false; }
+  PL.counting = true;
+  const beep = () => {
+    if(!ac) return;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'triangle'; o.frequency.value = left===1 ? 1100 : 780;
+    g.gain.setValueAtTime(0.001, ac.currentTime);
+    g.gain.linearRampToValueAtTime(0.25, ac.currentTime+0.005);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime+0.08);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime+0.09);
+  };
+  beep();
+  PL.cdTimer = setInterval(()=>{
+    left--;
+    if(left <= 0){
+      cancelCountdown();
+      startPlay(false, mi0||0);
+      return;
+    }
+    if(cn) cn.textContent = left;
+    beep();
+  }, 1000);
+}
 function togglePlay(){
   if(PL.preview){ PL.preview = false; pauseSource(); updateSyncUI(); }
-  if(!PL.playing){ startPlay(); return; }
+  if(PL.counting){ cancelCountdown(); return; }
+  if(!PL.playing){ startCountdown(0); return; }
   const mode = audMode();
   if(PL.paused){
     PL.ctx.resume().then(()=>{
@@ -1564,6 +1666,7 @@ function startPlay(atStartOnly, mi0){
   updatePlayUI();
 }
 function stopPlay(){
+  cancelCountdown();
   if(!PL.preview) pauseSource();
   if(!PL.playing && !PL.bar) return;
   PL.playing = false; PL.paused = false; if(PL.ctx && PL.ctx.state==='suspended') PL.ctx.resume();
@@ -1606,6 +1709,27 @@ $('#btnYt').addEventListener('click', ()=>{
 });
 $('#btnYtWin').addEventListener('click', ()=>{ PL.ytVisible = !PL.ytVisible; updateSyncUI(); });
 $('#btnYtHide').addEventListener('click', ()=>{ PL.ytVisible = false; updateSyncUI(); });
+(()=>{
+  const head = $('#ytHead'), box = $('#ytWrap');
+  if(!head || !box) return;
+  let drag = null;
+  head.addEventListener('pointerdown', e=>{
+    if(e.target.tagName === 'BUTTON') return;
+    const r = box.getBoundingClientRect();
+    box.style.left = r.left + 'px'; box.style.top = r.top + 'px';
+    box.style.right = 'auto'; box.style.bottom = 'auto';
+    drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    head.setPointerCapture && head.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  window.addEventListener('pointermove', e=>{
+    if(!drag) return;
+    const x = Math.max(4, Math.min(window.innerWidth - box.offsetWidth - 4, e.clientX - drag.dx));
+    const y = Math.max(4, Math.min(window.innerHeight - box.offsetHeight - 4, e.clientY - drag.dy));
+    box.style.left = x + 'px'; box.style.top = y + 'px';
+  });
+  window.addEventListener('pointerup', ()=>{ drag = null; });
+})();
 $('#btnLoadPdf').addEventListener('click', ()=>$('#pdfFile').click());
 $('#pdfFile').addEventListener('change', e=>{
   const f = e.target.files && e.target.files[0]; e.target.value = '';
