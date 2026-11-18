@@ -998,10 +998,34 @@ function hasBoxInk(data, w, x0, y0, x1, y1){
 }
 function cropBoxCanvas(srcCv, x0, y0, x1, y1){
   const w = Math.max(4, x1 - x0), h = Math.max(4, y1 - y0);
-  const c = document.createElement('canvas'); c.width = w * 2; c.height = h * 2;
+  const srcData = srcCv.getContext('2d').getImageData(x0, y0, w, h).data;
+  let maxLum = 0;
+  for(let i=0; i<srcData.length; i+=16){
+    const lum = 0.299*srcData[i] + 0.587*srcData[i+1] + 0.114*srcData[i+2];
+    if(lum > maxLum) maxLum = lum;
+  }
+  const thresh = Math.min(185, maxLum - 32);
+  let bx0=w, by0=h, bx1=-1, by1=-1;
+  for(let y=0; y<h; y++) for(let x=0; x<w; x++){
+    const i = (y*w+x)*4;
+    const lum = 0.299*srcData[i] + 0.587*srcData[i+1] + 0.114*srcData[i+2];
+    if(lum < thresh){ if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
+  }
+  if(bx1 < bx0){ bx0=0; by0=0; bx1=w-1; by1=h-1; }
+  const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1, sc = 3, pad = 24;
+  const c = document.createElement('canvas'); c.width = bw*sc + pad*2; c.height = bh*sc + pad*2;
   const cx = c.getContext('2d');
   cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
-  cx.drawImage(srcCv, x0, y0, w, h, 0, 0, c.width, c.height);
+  cx.imageSmoothingEnabled = true;
+  cx.drawImage(srcCv, x0+bx0, y0+by0, bw, bh, pad, pad, bw*sc, bh*sc);
+  const out = cx.getImageData(0, 0, c.width, c.height), od = out.data;
+  const hi = Math.max(180, maxLum - 10), lo = Math.max(40, maxLum - 125);
+  for(let i=0; i<od.length; i+=4){
+    const lum = 0.299*od[i] + 0.587*od[i+1] + 0.114*od[i+2];
+    const v = lum >= hi ? 255 : lum <= lo ? 0 : Math.round((lum - lo)/(hi - lo)*255);
+    od[i] = od[i+1] = od[i+2] = v; od[i+3] = 255;
+  }
+  cx.putImageData(out, 0, 0);
   return c;
 }
 function snapMeasureBox(data, w, h, ex0, ey0, ex1, ey1){
@@ -1116,15 +1140,20 @@ async function loadPdfFile(file){
       toast('박자 '+loaded+'개 인식 완료! 학번·이름·설명을 읽는 중…');
       try{
         if(!window.Tesseract) await loadScript(TESSERACT_JS);
-        const worker = await window.Tesseract.createWorker('kor+eng');
+        const wKor = await window.Tesseract.createWorker('kor');
+        await wKor.setParameters({ tessedit_pageseg_mode: '7' });
+        const wMix = await window.Tesseract.createWorker('kor+eng');
+        await wMix.setParameters({ tessedit_pageseg_mode: '7' });
         for(const job of ocrJobs){
-          const res = await worker.recognize(cropBoxCanvas(cv, job.x0, job.y0, job.x1, job.y1));
+          const useKorOnly = (job.type === 'who' && job.key === 'name');
+          const res = await (useKorOnly ? wKor : wMix).recognize(cropBoxCanvas(cv, job.x0, job.y0, job.x1, job.y1));
           const txt = String(res && res.data && res.data.text || '').replace(/\s+/g,' ').trim();
           if(!txt) continue;
           if(job.type === 'who') info[job.key] = txt.slice(0, 16);
           else notes[job.key] = txt;
         }
-        await worker.terminate();
+        await wKor.terminate();
+        await wMix.terminate();
       }catch(ocrErr){}
     }
     S.songs[S.cur] = { cells, notes, info };
