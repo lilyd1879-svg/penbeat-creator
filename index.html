@@ -1591,6 +1591,7 @@ function togglePlay(){
   if(!PL.playing){ startCountdown(0); return; }
   const mode = audMode();
   if(PL.paused){
+    if(PL.cueMi >= 0){ const m = PL.cueMi; PL.cueMi = -1; startCountdown(m); return; }
     PL.ctx.resume().then(()=>{
       if(mode !== 'none'){
         const baseStep = 60/curSong().tempo/4, offset = getSync(S.cur);
@@ -1685,7 +1686,7 @@ function startPlay(atStartOnly, mi0){
     }
     updateAudioTimeUI();
   }
-  PL.next = ac.currentTime + 0.12; PL.playing = true;
+  PL.next = ac.currentTime + 0.12; PL.playing = true; PL.cueMi = atStartOnly ? mi0 : -1;
   PL.timer = setInterval(pump, 25); PL.raf = requestAnimationFrame(frame);
   if(atStartOnly){
     PL.paused = true; ac.resume().then(()=>{ if(PL.paused) ac.suspend(); });
