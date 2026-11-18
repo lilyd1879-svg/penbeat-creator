@@ -1460,7 +1460,7 @@ function buildSeq(song){
     repBuf = [];
   };
   song.secs.forEach(sec=>sec.rows.forEach(row=>{
-    const hasRep = row.m.some(lb=>lb.indexOf('/')>=0);
+    const hasRep = row.m.some(lb=>lb.indexOf('/')>=0) || (row.ly && row.ly.length > 1);
     if(hasRep){
       repBuf.push({row, ri, domStart:domIdx});
     } else {
