@@ -885,7 +885,8 @@ function makeCharTemplates(){
   return out;
 }
 function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
-  const padX = Math.max(2, Math.round((x1-x0)*0.16)), padY = Math.max(2, Math.round((y1-y0)*0.16));
+  const cellW = x1 - x0, cellH = y1 - y0;
+  const padX = Math.max(3, Math.round(cellW*0.22)), padY = Math.max(3, Math.round(cellH*0.20));
   const sx0 = Math.max(0, x0+padX), sx1 = Math.min(imgW-1, x1-padX);
   const sy0 = Math.max(0, y0+padY), sy1 = y1-padY;
   if(sx1<=sx0 || sy1<=sy0) return '';
@@ -895,14 +896,14 @@ function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
     const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
     if(lum > maxLum) maxLum = lum;
   }
-  const thresh = Math.min(165, maxLum - 45);
+  const thresh = Math.min(160, maxLum - 48);
   let bx0=sx1, by0=sy1, bx1=sx0, by1=sy0, count=0;
   for(let y=sy0;y<=sy1;y++) for(let x=sx0;x<=sx1;x++){
     const idx = (y*imgW+x)*4;
     const lum = 0.299*imgData[idx] + 0.587*imgData[idx+1] + 0.114*imgData[idx+2];
     if(lum < thresh){ count++; if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
   }
-  if(count < 6 || (bx1-bx0)<2 || (by1-by0)<3) return '';
+  if(count < 12 || (bx1-bx0) < Math.max(4, cellW*0.20) || (by1-by0) < Math.max(5, cellH*0.25)) return '';
   const W = 16, H = 20, vec = new Float32Array(W*H);
   const bw = Math.max(1, bx1-bx0+1), bh = Math.max(1, by1-by0+1);
   for(let ty=0;ty<H;ty++) for(let tx=0;tx<W;tx++){
@@ -920,7 +921,7 @@ function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
     const sc = dot / (Math.sqrt(n1*n2) || 1);
     if(sc > bestScore){ bestScore = sc; best = ch; }
   });
-  return bestScore > 0.30 ? best : '';
+  return bestScore > 0.42 ? best : '';
 }
 function detectSongFromCanvas(data, w, h){
   const palette = SONGS.map(s=>{
@@ -957,11 +958,12 @@ function getRefCellRects(song){
     }
   });
   const cw = Math.max(1, cMaxX - cMinX), ch = Math.max(1, cMaxY - cMinY);
-  const rects = [];
-  $$('.c', sh).forEach(c=>{
-    const r = c.getBoundingClientRect();
-    rects.push({
-      k: c.dataset.k,
+  const mBoxes = [];
+  $$('.m', sh).forEach(m=>{
+    const r = m.getBoundingClientRect();
+    const cs = $$('.c', m);
+    mBoxes.push({
+      keys: cs.map(c=>c.dataset.k),
       x0: (r.left - cMinX) / cw,
       y0: (r.top - cMinY) / ch,
       x1: (r.right - cMinX) / cw,
@@ -969,7 +971,34 @@ function getRefCellRects(song){
     });
   });
   printRoot.replaceChildren();
-  return rects;
+  return mBoxes;
+}
+function snapMeasureBox(data, w, h, ex0, ey0, ex1, ey1){
+  const lum = (x,y) => { const i=(y*w+x)*4; return 0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]; };
+  const findH = (yEst) => {
+    let bestY = yEst, bestScore = Infinity;
+    const yA = Math.max(1, yEst-14), yB = Math.min(h-2, yEst+14);
+    for(let y=yA; y<=yB; y++){
+      let sum = 0, n = 0;
+      for(let x=Math.max(0, ex0+8); x<=Math.min(w-1, ex1-8); x+=4){ sum += lum(x,y); n++; }
+      const avg = n ? sum/n : 255;
+      if(avg < bestScore){ bestScore = avg; bestY = y; }
+    }
+    return bestScore < 185 ? bestY : yEst;
+  };
+  const sy0 = findH(ey0), sy1 = findH(ey1);
+  const findV = (xEst) => {
+    let bestX = xEst, bestScore = Infinity;
+    const xA = Math.max(1, xEst-14), xB = Math.min(w-2, xEst+14);
+    for(let x=xA; x<=xB; x++){
+      let sum = 0, n = 0;
+      for(let y=Math.max(0, sy0+3); y<=Math.min(h-1, sy1-3); y+=2){ sum += lum(x,y); n++; }
+      const avg = n ? sum/n : 255;
+      if(avg < bestScore){ bestScore = avg; bestX = x; }
+    }
+    return bestScore < 185 ? bestX : xEst;
+  };
+  return [findV(ex0), sy0, findV(ex1), sy1];
 }
 function findContentBounds(data, w, h){
   let minX = w, minY = h, maxX = -1, maxY = -1;
@@ -1024,16 +1053,21 @@ async function loadPdfFile(file){
     const songId = detectSongFromCanvas(img.data, cv.width, cv.height);
     if(SONGS.some(s=>s.id===songId)) S.cur = songId;
     const song = curSong();
-    const rects = getRefCellRects(song);
+    const mBoxes = getRefCellRects(song);
     const templates = makeCharTemplates();
     const bounds = findContentBounds(img.data, cv.width, cv.height);
     const cells = {};
     let loaded = 0;
-    rects.forEach(rc=>{
-      const x0 = Math.round(bounds.x + rc.x0*bounds.w), y0 = Math.round(bounds.y + rc.y0*bounds.h);
-      const x1 = Math.round(bounds.x + rc.x1*bounds.w), y1 = Math.round(bounds.y + rc.y1*bounds.h);
-      const ch = matchCellChar(img.data, cv.width, x0, y0, x1, y1, templates);
-      if(ch){ cells[rc.k] = ch; loaded++; }
+    mBoxes.forEach(mb=>{
+      const ex0 = Math.round(bounds.x + mb.x0*bounds.w), ey0 = Math.round(bounds.y + mb.y0*bounds.h);
+      const ex1 = Math.round(bounds.x + mb.x1*bounds.w), ey1 = Math.round(bounds.y + mb.y1*bounds.h);
+      const [mx0, my0, mx1, my1] = snapMeasureBox(img.data, cv.width, cv.height, ex0, ey0, ex1, ey1);
+      const cw = (mx1 - mx0) / mb.keys.length;
+      mb.keys.forEach((key, p)=>{
+        const x0 = Math.round(mx0 + p*cw), x1 = Math.round(mx0 + (p+1)*cw);
+        const ch = matchCellChar(img.data, cv.width, x0, my0, x1, my1, templates);
+        if(ch){ cells[key] = ch; loaded++; }
+      });
     });
     S.songs[S.cur] = { cells, notes:{}, info: infoOf(S.cur) };
     save(); render();
