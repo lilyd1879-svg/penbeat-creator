@@ -928,22 +928,20 @@ function matchCellChar(imgData, imgW, x0, y0, x1, y1, templates){
   return bestScore > 0.42 ? best : '';
 }
 function detectSongFromCanvas(data, w, h){
-  const palette = SONGS.map(s=>{
-    const hex = s.light.replace('#','');
-    return { id:s.id, r:parseInt(hex.slice(0,2),16), g:parseInt(hex.slice(2,4),16), b:parseInt(hex.slice(4,6),16), hits:0 };
-  });
-  for(let y=Math.floor(h*0.12); y<Math.floor(h*0.92); y+=4){
-    for(let x=Math.floor(w*0.04); x<Math.floor(w*0.96); x+=4){
+  const scores = { meaning:0, autumn:0, horizon:0, butterfly:0 };
+  for(let y=Math.floor(h*0.08); y<Math.floor(h*0.92); y+=3){
+    for(let x=Math.floor(w*0.03); x<Math.floor(w*0.97); x+=3){
       const i = (y*w+x)*4, r=data[i], g=data[i+1], b=data[i+2];
-      if(Math.max(r,g,b) - Math.min(r,g,b) < 12) continue;
-      palette.forEach(p=>{
-        const d = Math.abs(r-p.r) + Math.abs(g-p.g) + Math.abs(b-p.b);
-        if(d < 42) p.hits++;
-      });
+      const sat = Math.max(r,g,b) - Math.min(r,g,b);
+      if(sat < 7 || Math.max(r,g,b) < 90) continue;
+      if(r > b + 12 && g > b + 8) scores.meaning++;
+      else if(r >= g + 6 && b >= g && r >= b) scores.autumn++;
+      else if(r >= g - 2 && b > g + 7 && b > r + 3) scores.horizon++;
+      else if(g > r + 5 && g > b + 3) scores.butterfly++;
     }
   }
-  palette.sort((a,b)=>b.hits-a.hits);
-  return palette[0].hits > 30 ? palette[0].id : S.cur;
+  const avail = SONGS.map(s=>s.id).sort((a,b)=>(scores[b]||0)-(scores[a]||0));
+  return (scores[avail[0]] || 0) > 20 ? avail[0] : S.cur;
 }
 function getRefCellRects(song){
   buildPrintRoot('blank', true);
