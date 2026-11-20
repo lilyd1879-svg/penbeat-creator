@@ -1002,22 +1002,38 @@ function cropBoxCanvas(srcCv, x0, y0, x1, y1){
     const lum = 0.299*srcData[i] + 0.587*srcData[i+1] + 0.114*srcData[i+2];
     if(lum > maxLum) maxLum = lum;
   }
-  const thresh = Math.min(185, maxLum - 32);
+  const thresh = Math.min(195, maxLum - 25);
+  // Mask out horizontal border lines (e.g. .note bottom underline) so they don't pollute bounding box or OCR
+  const rowDark = new Uint16Array(h);
+  for(let y=0; y<h; y++){
+    let cnt = 0;
+    for(let x=0; x<w; x+=2){
+      const i = (y*w+x)*4;
+      const lum = 0.299*srcData[i] + 0.587*srcData[i+1] + 0.114*srcData[i+2];
+      if(lum < thresh) cnt++;
+    }
+    rowDark[y] = cnt;
+  }
+  const isBorderRow = (y) => rowDark[y] > (w/2) * 0.55;
   let bx0=w, by0=h, bx1=-1, by1=-1;
-  for(let y=0; y<h; y++) for(let x=0; x<w; x++){
-    const i = (y*w+x)*4;
-    const lum = 0.299*srcData[i] + 0.587*srcData[i+1] + 0.114*srcData[i+2];
-    if(lum < thresh){ if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
+  for(let y=0; y<h; y++){
+    if(isBorderRow(y)) continue;
+    for(let x=0; x<w; x++){
+      const i = (y*w+x)*4;
+      const lum = 0.299*srcData[i] + 0.587*srcData[i+1] + 0.114*srcData[i+2];
+      if(lum < thresh){ if(x<bx0)bx0=x; if(x>bx1)bx1=x; if(y<by0)by0=y; if(y>by1)by1=y; }
+    }
   }
   if(bx1 < bx0){ bx0=0; by0=0; bx1=w-1; by1=h-1; }
-  const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1, sc = 3, pad = 24;
+  const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+  const sc = bh < 28 ? 3 : 2, pad = 20;
   const c = document.createElement('canvas'); c.width = bw*sc + pad*2; c.height = bh*sc + pad*2;
   const cx = c.getContext('2d');
   cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
   cx.imageSmoothingEnabled = true;
   cx.drawImage(srcCv, x0+bx0, y0+by0, bw, bh, pad, pad, bw*sc, bh*sc);
   const out = cx.getImageData(0, 0, c.width, c.height), od = out.data;
-  const hi = Math.max(180, maxLum - 10), lo = Math.max(40, maxLum - 125);
+  const hi = Math.max(175, maxLum - 18), lo = Math.max(50, maxLum - 105);
   for(let i=0; i<od.length; i+=4){
     const lum = 0.299*od[i] + 0.587*od[i+1] + 0.114*od[i+2];
     const v = lum >= hi ? 255 : lum <= lo ? 0 : Math.round((lum - lo)/(hi - lo)*255);
@@ -1111,10 +1127,12 @@ async function loadPdfFile(file){
     const bounds = findContentBounds(img.data, cv.width, cv.height);
     const cells = {};
     let loaded = 0;
+    const snappedRows = [];
     ref.mBoxes.forEach(mb=>{
       const ex0 = Math.round(bounds.x + mb.x0*bounds.w), ey0 = Math.round(bounds.y + mb.y0*bounds.h);
       const ex1 = Math.round(bounds.x + mb.x1*bounds.w), ey1 = Math.round(bounds.y + mb.y1*bounds.h);
       const [mx0, my0, mx1, my1] = snapMeasureBox(img.data, cv.width, cv.height, ex0, ey0, ex1, ey1);
+      snappedRows.push({ ey: ey0, dy: my0 - ey0 });
       const cw = (mx1 - mx0) / mb.keys.length;
       mb.keys.forEach((key, p)=>{
         const x0 = Math.round(mx0 + p*cw), x1 = Math.round(mx0 + (p+1)*cw);
@@ -1122,17 +1140,86 @@ async function loadPdfFile(file){
         if(ch){ cells[key] = ch; loaded++; }
       });
     });
+    const nearestDy = (ey) => {
+      let best = 0, bestD = Infinity;
+      for(const r of snappedRows){ const d = Math.abs(r.ey - ey); if(d < bestD){ bestD = d; best = r.dy; } }
+      return Math.abs(best) <= 14 ? best : 0;
+    };
+    const snapBottomLine = (x0, x1, ey1) => {
+      let bestY = ey1, bestAvg = Infinity;
+      const yA = Math.max(1, ey1 - 12), yB = Math.min(cv.height - 2, ey1 + 12);
+      for(let y=yA; y<=yB; y++){
+        let sum = 0, n = 0;
+        for(let x=Math.max(0, x0+10); x<=Math.min(cv.width-1, x1-10); x+=6){
+          const i = (y*cv.width + x)*4;
+          sum += 0.299*img.data[i] + 0.587*img.data[i+1] + 0.114*img.data[i+2];
+          n++;
+        }
+        const avg = n ? sum/n : 255;
+        if(avg < bestAvg){ bestAvg = avg; bestY = y; }
+      }
+      return bestAvg < 205 ? bestY : ey1;
+    };
+
+    // Collect PDF text layer & FreeText annotations first (100% accurate when present)
+    const pdfTokens = [];
+    try{
+      const tc = await page.getTextContent();
+      for(const it of (tc && tc.items) || []){
+        const s = (it.str || '').trim();
+        if(!s) continue;
+        const [vx, vy] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+        const th = Math.max(8, (it.height || 10) * vp.scale);
+        const tw = Math.max(4, (it.width || 8) * vp.scale);
+        pdfTokens.push({ str: s, x: vx, y: vy - th * 0.35, x0: vx, x1: vx + tw, y0: vy - th, y1: vy + 2, isAnnot: false });
+      }
+    }catch(e){}
+    try{
+      const annots = await page.getAnnotations();
+      for(const an of annots || []){
+        const s = String((an.contentsObj && an.contentsObj.str) || an.contents || '').trim();
+        if(!s || !an.rect) continue;
+        const r = vp.convertToViewportRectangle(an.rect);
+        const ax0 = Math.min(r[0], r[2]), ax1 = Math.max(r[0], r[2]);
+        const ay0 = Math.min(r[1], r[3]), ay1 = Math.max(r[1], r[3]);
+        pdfTokens.push({ str: s, x: (ax0+ax1)/2, y: (ay0+ay1)/2, x0: ax0, x1: ax1, y0: ay0, y1: ay1, isAnnot: true });
+      }
+    }catch(e){}
+    const extractBoxText = (x0, y0, x1, y1, strictLeft) => {
+      const hits = pdfTokens.filter(t=>{
+        if(t.isAnnot){
+          const cx = (t.x0 + t.x1)/2, cy = (t.y0 + t.y1)/2;
+          return cx >= x0 - 6 && cx <= x1 + 6 && cy >= y0 - 8 && cy <= y1 + 8;
+        }
+        const leftOk = strictLeft ? (t.x0 >= x0 - 2) : (t.x >= x0 - 4);
+        return leftOk && t.x <= x1 + 6 && t.y >= y0 - 6 && t.y <= y1 + 6;
+      });
+      if(!hits.length) return '';
+      hits.sort((a,b) => Math.abs(a.y - b.y) > 8 ? a.y - b.y : a.x0 - b.x0);
+      return hits.map(h=>h.str).join(' ').replace(/\s+/g,' ').trim();
+    };
+
     const notes = {}, info = Object.assign({}, infoOf(S.cur));
     const ocrJobs = [];
     ref.whoBoxes.forEach(wb=>{
       const x0 = Math.round(bounds.x + wb.x0*bounds.w) + 2, y0 = Math.round(bounds.y + wb.y0*bounds.h) + 2;
       const x1 = Math.round(bounds.x + wb.x1*bounds.w) - 2, y1 = Math.round(bounds.y + wb.y1*bounds.h) - 2;
+      const direct = extractBoxText(x0, y0, x1, y1, true);
+      if(direct){ info[wb.key] = direct.slice(0, 16); return; }
       if(hasBoxInk(img.data, cv.width, x0, y0, x1, y1)) ocrJobs.push({ type:'who', key:wb.key, x0, y0, x1, y1 });
     });
     ref.noteBoxes.forEach((nb, si)=>{
-      const x0 = Math.round(bounds.x + nb.x0*bounds.w) + 2, y0 = Math.round(bounds.y + nb.y0*bounds.h) + 2;
-      const x1 = Math.round(bounds.x + nb.x1*bounds.w) - 2, y1 = Math.round(bounds.y + nb.y1*bounds.h) - 4;
-      if(hasBoxInk(img.data, cv.width, x0, y0, x1, y1)) ocrJobs.push({ type:'note', key:si, x0, y0, x1, y1 });
+      const x0 = Math.round(bounds.x + nb.x0*bounds.w) + 2;
+      const x1 = Math.round(bounds.x + nb.x1*bounds.w) - 2;
+      const rawY0 = Math.round(bounds.y + nb.y0*bounds.h);
+      const rawY1 = Math.round(bounds.y + nb.y1*bounds.h);
+      const dy = nearestDy(rawY0);
+      const boxH = Math.max(16, rawY1 - rawY0);
+      const y1 = snapBottomLine(x0, x1, rawY1 + dy);
+      const y0 = Math.max(0, y1 - boxH - 3);
+      const direct = extractBoxText(x0, y0, x1, y1 + 3, false);
+      if(direct){ notes[si] = direct; return; }
+      if(hasBoxInk(img.data, cv.width, x0, y0, x1, y1)) ocrJobs.push({ type:'note', key:si, x0, y0, x1, y1: y1 + 2 });
     });
     if(ocrJobs.length){
       toast('박자 '+loaded+'개 인식 완료! 학번·이름·설명을 읽는 중…');
@@ -1141,7 +1228,7 @@ async function loadPdfFile(file){
         const wKor = await window.Tesseract.createWorker('kor');
         await wKor.setParameters({ tessedit_pageseg_mode: '7' });
         const wMix = await window.Tesseract.createWorker('kor+eng');
-        await wMix.setParameters({ tessedit_pageseg_mode: '7' });
+        await wMix.setParameters({ tessedit_pageseg_mode: '7', preserve_interword_spaces: '1' });
         for(const job of ocrJobs){
           const useKorOnly = (job.type === 'who' && job.key === 'name');
           const res = await (useKorOnly ? wKor : wMix).recognize(cropBoxCanvas(cv, job.x0, job.y0, job.x1, job.y1));
