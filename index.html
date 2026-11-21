@@ -161,11 +161,11 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 .sync-box{display:inline-flex;align-items:center;gap:4px;font-size:12px}
 .sync-box input[type=number]{width:58px;height:30px;box-sizing:border-box;padding:0 4px;border:1.5px solid var(--border);border-radius:7px;text-align:center;font:inherit;background:var(--panel);color:var(--text)}
 .sync-box .btn.sm{height:30px;padding:0 7px;font-size:12px}
-#ytWrap{position:fixed;right:14px;bottom:14px;z-index:20;background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);overflow:hidden;width:248px}
-#ytWrap.off{position:fixed;left:-9999px !important;top:-9999px !important;right:auto !important;bottom:auto !important;opacity:.01;pointer-events:none}
-#ytHead{display:flex;align-items:center;justify-content:space-between;padding:4px 8px;font-size:11px;font-weight:700;background:var(--seg);color:var(--text);cursor:move;user-select:none;touch-action:none}
+#ytWrap{margin:8px auto 14px;background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.10);overflow:hidden;width:320px;max-width:calc(100vw - 24px)}
+#ytWrap.off{position:fixed;left:-9999px !important;top:-9999px !important;right:auto !important;bottom:auto !important;margin:0;opacity:.01;pointer-events:none}
+#ytHead{display:flex;align-items:center;justify-content:space-between;padding:5px 10px;font-size:11.5px;font-weight:700;background:var(--seg);color:var(--text);user-select:none}
 #ytHead button{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:13px;padding:0 4px}
-#ytPlayer{width:248px;height:140px;display:block}
+#ytPlayer{width:100%;height:180px;display:block}
 #cdBox{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;min-width:120px;padding:18px 30px;border-radius:20px;background:rgba(15,23,42,.86);color:#fff;text-align:center;box-shadow:0 14px 36px rgba(0,0,0,.35);pointer-events:none}
 #cdBox .cd-n{font-size:52px;font-weight:800;line-height:1}
 #cdBox .cd-s{margin-top:6px;font-size:13px;opacity:.85}
@@ -285,6 +285,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
     </div>
   </header>
   <main id="stage"><div id="wrap"></div></main>
+  <div id="ytWrap" class="off" hidden>
+    <div id="ytHead"><span>유튜브 반주</span><button type="button" id="btnYtHide" title="창 숨기기">✕</button></div>
+    <div id="ytPlayer"></div>
+  </div>
   <p class="foot" id="foot"></p>
 </div>
 <div id="dlg" hidden>
@@ -299,10 +303,6 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
   </div>
 </div>
 <div id="printRoot" aria-hidden="true"></div>
-<div id="ytWrap" class="off" hidden>
-  <div id="ytHead"><span>유튜브 반주 (드래그 이동)</span><button type="button" id="btnYtHide" title="창 숨기기">✕</button></div>
-  <div id="ytPlayer"></div>
-</div>
 <div id="cdBox" hidden><div class="cd-n" id="cdNum">4</div><div class="cd-s">준비하세요…</div></div>
 <div id="toast" role="status" aria-live="polite"></div>
 
@@ -1239,7 +1239,10 @@ async function loadPdfFile(file){
         }
         await wKor.terminate();
         await wMix.terminate();
-      }catch(ocrErr){}
+      }catch(ocrErr){
+        console.warn('PDF OCR failed:', ocrErr);
+        toast('박자 '+loaded+'개는 불러왔지만 글자(학번·이름·설명) 인식에 실패했어요.');
+      }
     }
     S.songs[S.cur] = { cells, notes, info };
     S.info = { no: info.no||'', name: info.name||'' };
@@ -1495,11 +1498,11 @@ function noiseHit(t, type, freq, q, peak, decay){
   s.connect(f); f.connect(g); g.connect(PL.out);
   s.start(t, Math.random()*0.8, decay+0.05);
 }
-function toneHit(t, f0, f1, peak, decay, type){
+function toneHit(t, f0, f1, peak, decay, type, dest){
   const ac = PL.ctx, o = ac.createOscillator(); o.type = type || 'sine';
   o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t+decay);
   const g = ac.createGain(); env(g, t, peak, decay);
-  o.connect(g); g.connect(PL.out); o.start(t); o.stop(t+decay+0.05);
+  o.connect(g); g.connect(dest || PL.out); o.start(t); o.stop(t+decay+0.05);
 }
 const rnd = (a)=> 1 + (Math.random()*2-1)*a;
 function kick(t, v){            /* 손바닥으로 책상 "쿵" (울림 + 볼륨 강화) */
@@ -1532,7 +1535,7 @@ function playCell(v, t){
 function metClick(stepIdx, t){
   if(!PL.metOn || stepIdx % 4 !== 0) return;
   const accent = (stepIdx % 16 === 0);
-  toneHit(t, accent ? 1200 : 880, accent ? 800 : 600, accent ? 0.55 : 0.30, 0.035, 'triangle');
+  toneHit(t, accent ? 1200 : 880, accent ? 800 : 600, accent ? 0.55 : 0.30, 0.035, 'triangle', PL.metOut || PL.out);
 }
 function stepDur(){ return 60/(curSong().tempo*PL.speed)/4; }
 function pump(){
@@ -1758,6 +1761,7 @@ function startPlay(atStartOnly, mi0){
   PL.ms = $$('.m', sh);
   PL.base = mi0*16; PL.times = []; PL.i = PL.base; PL.cur = 0; PL.lastGd = null;
   PL.out = ac.createGain(); PL.out.gain.value = 0.9; PL.out.connect(PL.comp);
+  PL.metOut = ac.createGain(); PL.metOut.gain.value = 0.55; PL.metOut.connect(ac.destination);
   PL.bar = el('div','ph');
   const mode = audMode();
   if(mode === 'yt'){
@@ -1789,6 +1793,7 @@ function stopPlay(){
   if(PL.bar && PL.bar.parentNode) PL.bar.remove();
   PL.bar = null;
   if(PL.out){ const o = PL.out; PL.out = null; try{ o.gain.cancelScheduledValues(0); o.gain.value = 0; }catch(e){} setTimeout(()=>{ try{ o.disconnect(); }catch(e){} }, 100); }
+  if(PL.metOut){ const m = PL.metOut; PL.metOut = null; try{ m.gain.cancelScheduledValues(0); m.gain.value = 0; }catch(e){} setTimeout(()=>{ try{ m.disconnect(); }catch(e){} }, 100); }
   updatePlayUI();
 }
 function updatePlayUI(){
@@ -1824,27 +1829,6 @@ $('#btnYt').addEventListener('click', ()=>{
 });
 $('#btnYtWin').addEventListener('click', ()=>{ PL.ytVisible = !PL.ytVisible; updateSyncUI(); });
 $('#btnYtHide').addEventListener('click', ()=>{ PL.ytVisible = false; updateSyncUI(); });
-(()=>{
-  const head = $('#ytHead'), box = $('#ytWrap');
-  if(!head || !box) return;
-  let drag = null;
-  head.addEventListener('pointerdown', e=>{
-    if(e.target.tagName === 'BUTTON') return;
-    const r = box.getBoundingClientRect();
-    box.style.left = r.left + 'px'; box.style.top = r.top + 'px';
-    box.style.right = 'auto'; box.style.bottom = 'auto';
-    drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
-    head.setPointerCapture && head.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  });
-  window.addEventListener('pointermove', e=>{
-    if(!drag) return;
-    const x = Math.max(4, Math.min(window.innerWidth - box.offsetWidth - 4, e.clientX - drag.dx));
-    const y = Math.max(4, Math.min(window.innerHeight - box.offsetHeight - 4, e.clientY - drag.dy));
-    box.style.left = x + 'px'; box.style.top = y + 'px';
-  });
-  window.addEventListener('pointerup', ()=>{ drag = null; });
-})();
 $('#btnLoadPdf').addEventListener('click', ()=>$('#pdfFile').click());
 $('#pdfFile').addEventListener('change', e=>{
   const f = e.target.files && e.target.files[0]; e.target.value = '';
